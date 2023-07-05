@@ -1,6 +1,9 @@
 import { TokenInfo, TokenList } from '@uniswap/token-lists';
 import { BigNumber, Transaction, ethers } from 'ethers';
 import { getAddress } from 'ethers/lib/utils';
+import { GenericMarketMakingStrategy } from '../strategies/marketMaking/genericMarketMaking';
+import { RiskMinimizedStrategy } from '../strategies/marketMaking/riskMinimizedUpOnly';
+import { TargetVenueOutBidStrategy } from '../strategies/marketMaking/targetVenueOutBid';
 
 export enum Network {
     MAINNET = 1,
@@ -20,12 +23,17 @@ export const marketAddressesByNetwork: Record<number, string> = {
     [Network.OPTIMISM_GOERLI]: getAddress('0x6cD8666aBB003073e45D69E5b3aa0b0Fe9CDBF91'),
     [Network.OPTIMISM_MAINNET]: getAddress('0x7a512d3609211e719737E82c7bb7271eC05Da70d'),
     [Network.POLYGON_MUMBAI]: getAddress('0x10418D9e730fa659b0Baf0b640ee41FcF4EA2aaE'),
+    [Network.ARBITRUM_TESTNET]: getAddress('0x506407f25B746C39807c03A96DD595a6BE223211'),
+    [Network.ARBITRUM_MAINNET]: getAddress('0xC715a30FDe987637A082Cf5F19C74648b67f2db8'),
 };
 
 // https://docs.rubicon.finance/docs/protocol/deployments
 export const marketAidFactoriesByNetwork: Record<number, string> = {
-    [Network.OPTIMISM_GOERLI]: getAddress('0x528E6d1636bb8578074cc888BD85d561f7847066'),
-    // [Network.OPTIMISM_MAINNET]: getAddress(''),
+    [Network.OPTIMISM_GOERLI]: getAddress('0x2D77E00EfE8375903eaD1135BD1eb31cBcf1bA69'),
+    [Network.OPTIMISM_MAINNET]: getAddress('0x267D94C6e67e4436EFfE092b08d040cFF36B2DA7'),
+    [Network.POLYGON_MUMBAI]: getAddress('0x4841DcC66F6CfC600382ec98f34d43332c535B9B'),
+    [Network.ARBITRUM_TESTNET]: getAddress('0x746750031Cc56Ccb386D9a6a0fcAb34C0A138BbD'),
+    [Network.ARBITRUM_MAINNET]: getAddress('0x6CB24A263732579EfD56f3E071851e989d78cE75'),
 };
 
 // Input tokens 
@@ -174,7 +182,7 @@ export const tokenList: TokenList = {
             symbol: 'WETH',
             name: 'Wrapped Ethereum',
             decimals: 18,
-            address: '0x54e63385c13ECbE3B859991eEdad539d9fDa1167', // '0x4200000000000000000000000000000000000006', //   0x54e63385c13ECbE3B859991eEdad539d9fDa1167
+            address: '0x54e63385c13ECbE3B859991eEdad539d9fDa1167', // '0x4200000000000000000000000000000000000006'
             chainId: Network.OPTIMISM_GOERLI,
             extensions: {
                 underlyingAssetGeckoID: 'ethereum',
@@ -240,8 +248,118 @@ export const tokenList: TokenList = {
             symbol: "TEST",
             decimals: 18,
             name: "Test Coin",
-        }
+        },
+        /// *** ARBITRUM MAINNET ***
+        {
+            name: 'Wrapped Ethereum',
+            symbol: 'WETH',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
+            decimals: 18,
+            extensions: {
+                underlyingAssetGeckoID: 'ethereum',
+                isNativeAssetWrapper: true,
+            },
+        },
+        {
+            name: 'USDC Stablecoin',
+            symbol: 'USDC',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+            decimals: 6,
+            extensions: {
+                quote: true,
+            },
+        },
+        {
+            name: 'Bridged USDC Stablecoin',
+            symbol: 'USDC.e',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8',
+            decimals: 6,
+            extensions: {
+                quote: true,
+            },
+        },
+        {
+            name: 'DAI Stablecoin',
+            symbol: 'DAI',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',
+            decimals: 18,
+            extensions: {
+                quote: true,
+            },
+        },
+        {
+            name: 'Tether',
+            symbol: 'USDT',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
+            decimals: 6,
+            extensions: {
+                quote: true,
+            },
+        },
+        {
+            name: 'Wrapped BTC',
+            symbol: 'WBTC',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
+            decimals: 8,
+        },
+        {
+            name: 'Arbitrum',
+            symbol: 'ARB',
+            chainId: Network.ARBITRUM_MAINNET,
+            address: '0x912CE59144191C1204E64559FE8253a0e49E6548',
+            decimals: 18,
+        },
 
+
+        // ARBITRUM GOERLI 
+        {
+            address: "0x175A6D830579CAcf1086ECC718fAB2A86b12e0D3",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "WETH",
+            decimals: 18,
+            name: "Wrapped Ether",
+        },
+        {
+            address: "0xb37b4399880AfEF7025755d65C193363966b8b89",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "DAI",
+            decimals: 18,
+            name: "Dai Stablecoin",
+        },
+        {
+            address: "0x34cB584d2E4f3Cd37e93A46A4C754044085439b4",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "USDC",
+            decimals: 18,
+            name: "USDC Stablecoin",
+        },
+        {
+            address: "0x6ABc1231d85D422c9Fe25b5974B4C0D4AB85d9b5",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "USDT",
+            decimals: 18,
+            name: "Tether",
+        },
+        {
+            address: "0x710c1A969cbC8ab5644571697824c655ffBDE926",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "WBTC",
+            decimals: 18,
+            name: "Wrapped Bitcoin",
+        },
+        {
+            address: "0x83250b2783554D4D401c45c39fF8A161dE44BC15",
+            chainId: Network.ARBITRUM_TESTNET,
+            symbol: "TEST",
+            decimals: 18,
+            name: "Test Coin",
+        },
     ],
 };
 
@@ -273,6 +391,7 @@ export const ETH_ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 export type BotConfiguration = {
     botType: BotType;
+    strategy?: any; //scalability
     network: Network;
     targetTokens?: TokenInfo[];
     connections: { jsonRpcProvider: ethers.providers.JsonRpcProvider, signer: ethers.Signer, websocketProvider?: ethers.providers.WebSocketProvider }
