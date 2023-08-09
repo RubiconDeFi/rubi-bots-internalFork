@@ -4,7 +4,7 @@
 // enough based on a configurable threshold from the liquidity venue's liveBook
 
 import { BigNumber, ethers } from "ethers";
-import { BotConfiguration, TransactionResponse, marketAddressesByNetwork } from "../../configuration/config";
+import { BotConfiguration, MIN_ORDER_SIZES, SimpleBook, TransactionResponse, marketAddressesByNetwork } from "../../configuration/config";
 import { GenericMarketMakingStrategy } from "../../strategies/marketMaking/genericMarketMaking";
 import { AssetPair, GenericLiquidityVenue } from "../../liquidityVenues/generic";
 import { TargetVenueOutBidStrategy } from "../../strategies/marketMaking/targetVenueOutBid";
@@ -116,8 +116,8 @@ export class GenericMarketMakingBot {
         (this.strategy.referenceLiquidityVenue as UniswapLiquidityVenue).pollLiveBook(
             async () => {
                 // Refresh availableLiquidity and get the updated assetLadder based on it
-                await this.pullOnChainLiquidity(this.EOAbotAddress);
-                const _uniQueryLadder = getLadderFromAvailableLiquidity(this.availableLiquidity, 5);
+                const data = await this.pullOnChainLiquidity(this.EOAbotAddress);
+                const _uniQueryLadder = getLadderFromAvailableLiquidity(data, 5, this.strategy.targetBook, this.config);
                 // Print the formatted ladder
                 return _uniQueryLadder;
             },
@@ -152,6 +152,11 @@ export class GenericMarketMakingBot {
         const strategyBook = this.strategy.targetBook;
         const marketAidBook = this.marketAidPositionTracker.liveBook;
         // TODO: solve for this better
+
+        // LOG THE ASSET PAIR SYMBOLS
+        console.log('THIS ASSET PAIR IN COMPARE', this.assetPair);
+        console.log('THIS STRATEGY BOOK IN COMPARE', strategyBook);
+
 
         // const deltaTrigger = 0.003; // Relative difference in price between the strategy's targetBook and the market-aid's liveBook that triggers an order execution
 
@@ -201,39 +206,121 @@ export class GenericMarketMakingBot {
         console.log("Checking for requotes at this deltaTrigger: ", deltaTrigger, "this implied amount", midpoint * deltaTrigger);
 
 
+        function scaleOrderSizes(book: any, liquidityThreshold: number, minOrderSizes: any, symbol: string, isBidBook: boolean = false): any {
+            // Calculate total size of orders in book (in terms of quote asset)
+            let totalSize = book.reduce((acc, order) => acc + order.size * order.price, 0);
+            let scaleFactor;
+            const buffer = 0.8; // scaling up buffer
 
-        // TODO: the existance of this should be investigated maybe haha - perhaps a bad side effect of available liquidity at the bot level and not strategy level?
-        // Check if the total size of asks or bids in strategy book exceeds the available liquidity
-        const totalAskSize = strategyBook.asks.reduce((acc, ask) => acc + ask.size, 0);
-        // Convert totalBidSize from asset amount to quote amount
-        const totalBidSize = strategyBook.bids.reduce((acc, bid) => acc + (bid.size * bid.price), 0);
-        if (totalAskSize > askLiquidityThreshold || totalBidSize > bidLiquidityThreshold) {
-            console.log('Strategy book size exceeds available liquidity threshold');
-            const askScaleFactor = askLiquidityThreshold / totalAskSize;
-            // Log values
-            console.log(
-                'askLiquidityThreshold:',
-                askLiquidityThreshold,
-                'totalAskSize:',
-                totalAskSize,
-            );
+            let totalAllocated = 0;
+            if (totalSize > liquidityThreshold) {
+                console.log('Book size exceeds liquidity threshold');
+                scaleFactor = liquidityThreshold / totalSize;
+                console.log('Scaling book down by factor:', scaleFactor);
 
-            console.log(
-                'bidLiquidityThreshold:',
-                bidLiquidityThreshold,
-                'totalBidSize:',
-                totalBidSize,
-            );
+                // Scale down the sizes of the orders in the book
+                book = book.map((order: any) => {
+                    let newSize = order.size * scaleFactor;
+                    // Convert min size to base asset if it's a bid order, else keep it as is
+                    const minSize = isBidBook ? minOrderSizes[symbol] / order.price : minOrderSizes[symbol];
+                    if (newSize < minSize) {
+                        // console.log(`Scaled order size ${newSize} for ${symbol} is less than minimum ${minSize}.`);
+                        // // Check if there is enough liquidity to set the order size to the minimum
+                        // const excessLiquidity = liquidityThreshold - totalSize + newSize * order.price;
+                        // if (excessLiquidity >= minSize * order.price) {
+                        //     console.log(`Enough excess liquidity. Setting size to minimum ${minSize}.`);
 
+                        // If the next order size will make totalAllocated exceed liquidityThreshold, then set the size 0
+                        if (totalAllocated + minSize > liquidityThreshold) {
+                            newSize = 0;
+                        } else {
+                            newSize = minSize;
+                            isBidBook ?
+                                totalAllocated += newSize * order.price : totalAllocated += newSize;
+                        }// } else {
+                        //     console.log(`Not enough excess liquidity. Using remaining liquidity to set size.`);
+                        //     newSize = excessLiquidity / order.price;
+                        // }
+                    }
+                    // Recalculate totalSize for remaining orders
+                    // totalSize = book.reduce((acc, order) => acc + (order.size * order.price), 0);
+                    return { price: order.price, size: newSize };
+                });
+            } else if (totalSize < liquidityThreshold * buffer) {
+                console.log('Book size is less than the buffer of liquidity threshold');
+                scaleFactor = (liquidityThreshold * buffer) / totalSize;
+                console.log('Scaling book up by factor:', scaleFactor);
 
-            const bidScaleFactor = bidLiquidityThreshold / totalBidSize;
-            console.log('Scaling strategy book by factors:', { ask: askScaleFactor, bid: bidScaleFactor });
-
-            // Scale the sizes of the offers in the book
-            strategyBook.asks = strategyBook.asks.map(ask => ({ price: ask.price, size: ask.size * askScaleFactor }));
-            strategyBook.bids = strategyBook.bids.map(bid => ({ price: bid.price, size: bid.size * bidScaleFactor }));
+                // Scale up the sizes of the orders in the book
+                book = book.map((order: any) => {
+                    let newSize = order.size * scaleFactor;
+                    return { price: order.price, size: newSize };
+                });
+            }
+            return book;
         }
 
+        function rescaleOrderBook(strategyBook: any, askLiquidityThreshold: number, bidLiquidityThreshold: number, minOrderSizes: any, assetPair: any): any {
+            // Rescale asks and bids separately
+            strategyBook.asks = scaleOrderSizes(strategyBook.asks, askLiquidityThreshold, minOrderSizes, assetPair.asset.symbol, false);
+            strategyBook.bids = scaleOrderSizes(strategyBook.bids, bidLiquidityThreshold, minOrderSizes, assetPair.quote.symbol, true);
+
+            return strategyBook;
+        }
+
+
+        // Rescale the strategy book based on the available liquidity
+        // This should count through each side of the book BACKWARDS and whenever it clears the total liquidity check, grab the orders less than total liquidity only
+        function onlyUseOrdersWithAvailableLiquidity(state: GenericMarketMakingBot) {
+            console.log('RAW strategy book:', strategyBook);
+
+            const quoteLiquidity = parseFloat(formatUnits(state.availableLiquidity.quoteWeiAmount, state.assetPair.quote.decimals));
+            const assetLiquidity = parseFloat(formatUnits(state.availableLiquidity.assetWeiAmount, state.assetPair.asset.decimals));
+            // Human readable quote and asset liquidity:
+            console.log('Human readable quote liquidity:', quoteLiquidity);
+            console.log('Human readable asset liquidity:', assetLiquidity);
+
+            // Iterate through the asks and bids of strategy book BACKWARDS, last to first, and exclude those that are greater than the available liquidity
+            // Must sum allocated liquidity to each order through iterations
+            let totalAllocated = 0;
+            for (let i = strategyBook.asks.length - 1; i >= 0; i--) {
+                const ask = strategyBook.asks[i];
+                const askSize = ask.size;
+                // console.log("Ask size:", askSize);
+                // console.log("Total allocated:", totalAllocated);
+                if (totalAllocated + askSize > assetLiquidity) {
+                    // console.log("Ask is greater than available liquidity, setting size to 0");
+                    strategyBook.asks[i].size = 0;
+                } else {
+                    // console.log("Ask is less than available liquidity, keeping size");
+                    totalAllocated += askSize;
+                }
+            }
+
+            // Reset the total allocated
+            totalAllocated = 0;
+            for (let i = strategyBook.bids.length - 1; i >= 0; i--) {
+                const bid = strategyBook.bids[i];
+                const bidSize = bid.size * bid.price;
+                // console.log("Bid size:", bidSize);
+                // console.log("Total allocated:", totalAllocated);
+                if (totalAllocated + bidSize > quoteLiquidity) {
+                    // console.log("Bid is greater than available liquidity, setting size to 0");
+                    strategyBook.bids[i].size = 0;
+                } else {
+                    // console.log("Bid is less than available liquidity, keeping size");
+                    totalAllocated += bidSize;
+                }
+            }
+            console.log('*****Rescaled strategy book:', strategyBook);
+
+        }
+
+        onlyUseOrdersWithAvailableLiquidity(this);
+
+        // Usage:
+        // const rescaledBook = rescaleOrderBook(strategyBook, askLiquidityThreshold, bidLiquidityThreshold, MIN_ORDER_SIZES, this.assetPair);
+        // console.log('Rescaled book:', rescaledBook);
 
         // Check if the asks and the bids are not defined in both books
         // Both books have defined values for asks and bids
@@ -259,6 +346,10 @@ export class GenericMarketMakingBot {
                     const marketAidAskPrice = isNaN(marketAidAsk.price) ? 0 : marketAidAsk.price;
                     const askDelta = Math.abs(strategyAskPrice - marketAidAskPrice) / strategyAskPrice;
 
+                    if ((strategyAsk.size === 0 || isNaN(strategyAsk.size)) || (strategyAskPrice === 0 || isNaN(strategyAskPrice))) {
+                        continue;  // ignore this ask
+                    }
+
                     if (askDelta > deltaTrigger) {
                         console.log("Ask delta is greater than deltaTrigger, updating market aid position");
                         this.requoteMarketAidPosition();
@@ -271,6 +362,10 @@ export class GenericMarketMakingBot {
                     const strategyBidPrice = isNaN(strategyBid.price) ? 0 : strategyBid.price;
                     const marketAidBidPrice = isNaN(marketAidBid.price) ? 0 : marketAidBid.price;
                     const bidDelta = Math.abs(strategyBidPrice - marketAidBidPrice) / strategyBidPrice;
+
+                    if ((strategyBid.size === 0 || isNaN(strategyBid.size)) || (strategyBid.price === 0 || isNaN(strategyBid.price))) {
+                        continue;  // ignore this bid
+                    }
 
                     if (bidDelta > deltaTrigger) {
                         console.log("Bid delta is greater than deltaTrigger, updating market aid position");
@@ -292,8 +387,10 @@ export class GenericMarketMakingBot {
                     // this.requoteMarketAidPosition();
 
                     // Until we can requote where targets.length != desiredLiquidity curve.length, we will wipe the book
-                    console.log("Market Aid book is less in length than the target book, wiping the on-chain book");
-                    this.wipeOnChainBook();
+                    
+                    
+                    // console.log("Market Aid book is less in length than the target book, wiping the on-chain book");
+                    // this.wipeOnChainBook();
                 }
             }
         }
@@ -577,8 +674,8 @@ export class GenericMarketMakingBot {
                 // console.log("Got this after getStratTotalLiquidity", r);
 
                 // Log formatted the response
-                console.log("Formatted Liquidity - Asset Amount:", formatUnits(r.assetWeiAmount, 18));
-                console.log("Formatted Liquidity - Quote Amount:", formatUnits(r.quoteWeiAmount, 18));
+                console.log("Formatted Liquidity - Asset Amount:", formatUnits(r.assetWeiAmount, this.config.targetTokens[0].decimals));
+                console.log("Formatted Liquidity - Quote Amount:", formatUnits(r.quoteWeiAmount, this.config.targetTokens[1].decimals));
 
                 // Create a new object with the same properties as r
                 // TODO: arbitrary scalar here
@@ -795,11 +892,13 @@ export class GenericMarketMakingBot {
     }
 }
 
-export function getLadderFromAvailableLiquidity(availableLiquidity: MarketAidAvailableLiquidity, stepSize: number): { assetLadder: BigNumber[], quoteLadder: BigNumber[] } {
+export function getLadderFromAvailableLiquidity(availableLiquidity: MarketAidAvailableLiquidity, stepSize: number, targetBook: SimpleBook, config: BotConfiguration): { assetLadder: BigNumber[], quoteLadder: BigNumber[] } {
     // console.log("I think this is my available liquidity", availableLiquidity);
 
     // Print as formatted values
-    console.log("I think this is my available liquidity", formatUnits(availableLiquidity.assetWeiAmount, 18), formatUnits(availableLiquidity.quoteWeiAmount, 18));
+    // console.log("I think this is my available liquidity", formatUnits(availableLiquidity.assetWeiAmount, 18), formatUnits(availableLiquidity.quoteWeiAmount, 18));
+
+    // console.log('This could be right quote amount', formatUnits(availableLiquidity.quoteWeiAmount, 6));
 
     // Chat GPT helped me with this lol
     // TODO: update this from linear to exponential
@@ -835,13 +934,65 @@ export function getLadderFromAvailableLiquidity(availableLiquidity: MarketAidAva
 
 
     // Calculate the total asset and quote amounts
-    const totalAssetAmount = assetLadder.reduce((acc, curr) => acc.add(curr), BigNumber.from(0));
-    const totalQuoteAmount = quoteLadder.reduce((acc, curr) => acc.add(curr), BigNumber.from(0));
+    // const totalAssetAmount = assetLadder.reduce((acc, curr) => acc.add(curr), BigNumber.from(0));
+    // const totalQuoteAmount = quoteLadder.reduce((acc, curr) => acc.add(curr), BigNumber.from(0));
 
     // Log the total amounts in human readable format
-    console.log("Total Asset Amount:", formatUnits(totalAssetAmount, 18));
-    console.log("Total Quote Amount:", formatUnits(totalQuoteAmount, 18));
+    // console.log(`Total Asset Amount:`, formatUnits(totalAssetAmount, 18));
+    // console.log(`Total Quote Amount:`, formatUnits(totalQuoteAmount, 18));
 
+
+    // Resulting ladder from a liquidity perspective!
+    console.log("Asset Ladder", assetLadder.map((a) => formatUnits(a)));
+    console.log("Quote Ladder", quoteLadder.map((a) => formatUnits(a)));
+
+    // TODO: using the price of the trading pair, convert the asset ladder to a quote ladder and vice versa
+
+    // Now we have price
+    if (targetBook != undefined && targetBook.asks != undefined && targetBook.bids != undefined) {
+        console.log("THIS TARGET BOOK", targetBook);
+
+        // Calculate the midpoint as a reference price
+        const referencePrice = (targetBook.asks[0].price + targetBook.bids[0].price) / 2;
+        if (!referencePrice || isNaN(referencePrice)) {
+            console.log("\nFAIL NAN REFERENCE PRICE, WILL NOT PROCEED");
+
+            // TODO: This as initialization condition is quite bad
+            return {
+                assetLadder: assetLadder,
+                quoteLadder: quoteLadder
+            };
+        } else {
+            console.log("\nTHIS REFERENCE PRICE", referencePrice);
+
+            // First, convert wei amount to human readable in each ladder
+            const humanReadableAssetLadder = assetLadder.map((a) => parseFloat(formatUnits(a, config.targetTokens[0].decimals)));
+            const humanReadableQuoteAmount = quoteLadder.map((a) => parseFloat(formatUnits(a, config.targetTokens[1].decimals)));
+
+            console.log("\nHUMAN READABLE ASSET LADDER", humanReadableAssetLadder);
+            console.log("\nHUMAN READABLE QUOTE LADDER", humanReadableQuoteAmount);
+
+
+            // TODO: Iterate this to maximize value being placed up to the limit
+            // Now, using price (quote per asset) convert the asset ladder to a quote ladder
+            const quoteLadderFromAssetLadder = humanReadableAssetLadder.map((a) => a * referencePrice);
+            console.log("\nQUOTE LADDER FROM ASSET LADDER", quoteLadderFromAssetLadder);
+
+            // Now, using price (quote per asset) convert the quote ladder to an asset ladder
+            const assetLadderFromQuoteLadder = humanReadableQuoteAmount.map((a) => a / referencePrice);
+            console.log("\nASSET LADDER FROM QUOTE LADDER", assetLadderFromQuoteLadder);
+
+            console.log("*******RETURNING CORRRECTLY FLIPPED LADDERS*****");
+
+            return {
+                assetLadder: assetLadderFromQuoteLadder.map((v) => parseUnits(v.toFixed(config.targetTokens[0].decimals), config.targetTokens[0].decimals)),
+                quoteLadder: quoteLadderFromAssetLadder.map((v) => parseUnits(v.toFixed(config.targetTokens[1].decimals), config.targetTokens[1].decimals))
+            };
+        }
+
+
+    }
+    // }
 
 
     return {
